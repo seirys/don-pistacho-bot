@@ -875,4 +875,18 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// =====================
+// HTTP SERVER (GPT)
+// =====================
+const app = express();
+app.use(express.json());
+
+app.get('/health', (req, res) => {
+  res.json({ ok: true, bot: 'Don Pistacho', status: 'online' });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🌐 HTTP server listening on port ${PORT}`);
+});
 client.login(DISCORD_TOKEN);
