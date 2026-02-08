@@ -875,284 +875,55 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-/* ======================
-   HTTP SERVER (GPT API)
-====================== */
+// =======================
+// HTTP SERVER (GPT API)
+// =======================
+const app = express();
+app.use(express.json());
 
-const { GPT_API_KEY, DEFAULT_CHANNEL_ID, PUBLIC_GPT_NO_KEY } = process.env;
-
-// Middleware seguridad
-function requireGptKey(req, res, next) {
-  if (PUBLIC_GPT_NO_KEY === 'true') return next();
-  if (!GPT_API_KEY) {
-    return res.status(500).json({ ok: false, error: 'GPT_API_KEY no configurada en Railway' });
-  }
-  const key = req.header('x-api-key');
-  if (key !== GPT_API_KEY) return res.status(401).json({ ok: false, error: 'unauthorized' });
-  next();
-}
-
-// Helper: responder bonito
-function ok(res, data = {}) { return res.json({ ok: true, ...data }); }
-function bad(res, code, msg, extra = {}) { return res.status(code).json({ ok: false, error: msg, ...extra }); }
-
-// Helper: asegurar canal para votación
-function resolveChannelId(req) {
-  return String(req.body?.channel_id || req.query?.channel_id || DEFAULT_CHANNEL_ID || '').trim();
-}
-
-// Convierte lista de títulos/links del GPT → array
-function parseTitles(raw) {
-  return (raw || '')
-    .split(/[;,]/g)
-    .map(s => s.trim())
-    .filter(Boolean)
-    .slice(0, 5);
-}
-
-// Crea una votación “tipo discord” desde el API (reusa tu sistema de botones)
-async function createDiscordPoll({ channelId, picked, durationMs }) {
-  // channelId debe existir
-  const channel = await client.channels.fetch(channelId).catch(() => null);
-  if (!channel) throw new Error('No puedo acceder al canal. Revisa DEFAULT_CHANNEL_ID o permisos del bot.');
-
-  const pollId = `${channelId}-${Date.now()}`;
-  const poll = { id: pollId, movies: picked, userVotes: new Map(), closed: false };
-  client.polls.set(pollId, poll);
-
-  const embed = new EmbedBuilder()
-    .setTitle('🗳️ Votación de peli (creada por GPT)')
-    .setDescription(picked.map((m, i) => `**${i + 1}.** ${formatMovieLine(m)} — 🗳️ **0**`).join('\n'))
-    .setFooter({ text: `Dura ${Math.round(durationMs / 1000)}s • Puedes cambiar tu voto` });
-
-  const row = new ActionRowBuilder().addComponents(
-    ...picked.map((_, i) =>
-      new ButtonBuilder()
-        .setCustomId(`vote:${pollId}:${i + 1}`)
-        .setLabel(String(i + 1))
-        .setStyle(ButtonStyle.Primary)
-    )
-  );
-
-  const msg = await channel.send({ embeds: [embed], components: [row] });
-
-  // Cierre automático
-  setTimeout(async () => {
-    const p = client.polls.get(pollId);
-    if (!p || p.closed) return;
-    p.closed = true;
-
-    const counts = {};
-    for (let i = 1; i <= p.movies.length; i++) counts[String(i)] = 0;
-    for (const v of p.userVotes.values()) counts[v]++;
-
-    let best = '1';
-    for (let i = 2; i <= p.movies.length; i++) {
-      const k = String(i);
-      if (counts[k] > counts[best]) best = k;
-    }
-    const winner = p.movies[Number(best) - 1];
-
-    const finalLines = p.movies.map((m, i) => {
-      const k = String(i + 1);
-      return `**${k}.** ${formatMovieLine(m)} — 🗳️ **${counts[k]}**`;
-    }).join('\n');
-
-    const finalEmbed = new EmbedBuilder()
-      .setTitle('🗳️ Votación cerrada')
-      .setDescription(finalLines)
-      .addFields({ name: '🎬 Ganadora', value: `**${formatMovieLine(winner)}**` });
-
-    const disabledRow = new ActionRowBuilder().addComponents(
-      row.components.map(b => ButtonBuilder.from(b).setDisabled(true))
-    );
-
-    try { await msg.edit({ embeds: [finalEmbed], components: [disabledRow] }); } catch {}
-  }, durationMs);
-
-  return { pollId, messageId: msg.id };
-}
-
-/* ---------- Endpoints GPT ---------- */
-
-// Salud
-app.get('/gpt/health', requireGptKey, (req, res) => {
-  ok(res, { service: 'don-pistacho', status: 'online' });
+// --- Health check (Railway / uptime) ---
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    bot: 'Don Pistacho',
+    status: 'online',
+    time: new Date().toISOString(),
+  });
 });
 
-// Ver pendientes (con límite configurable)
-app.get('/gpt/pending', requireGptKey, (req, res) => {
-  const limit = Math.max(1, Math.min(200, Number(req.query?.limit || LIST_LIMIT || 100)));
-  const rows = db.prepare(`
-    SELECT title, year
-    FROM movies
-    WHERE status='pending'
-    ORDER BY added_at DESC
-    LIMIT ?
-  `).all(limit);
-
-  ok(res, { count: rows.length, limit, pending: rows.map(r => ({ title: r.title, year: r.year || null })) });
+// --- Endpoint base (prueba) ---
+app.get('/', (req, res) => {
+  res.send('🍿 Don Pistacho está vivo y listo para el GPT');
 });
 
-// Añadir peli (título o link IMDb)
-app.post('/gpt/add', requireGptKey, async (req, res) => {
+// --- Endpoint GPT (aquí conectaremos OpenAI luego) ---
+app.post('/gpt', async (req, res) => {
   try {
-    const titulo = String(req.body?.titulo || '').trim();
-    if (!titulo) return bad(res, 400, 'titulo requerido');
+    const { message, user } = req.body;
 
-    const m = await tmdbResolveMovie(titulo);
-    if (!m) return bad(res, 404, 'no encontrada en TMDB');
-
-    const year = (m.release_date || '').slice(0, 4) || '';
-
-    try {
-      db.prepare(`
-        INSERT INTO movies (tmdb_id, title, year, status, added_by)
-        VALUES (?, ?, ?, 'pending', ?)
-      `).run(m.id, m.title, year, 'gpt');
-
-      ok(res, { action: 'added', movie: { tmdb_id: m.id, title: m.title, year: year || null } });
-    } catch {
-      ok(res, { action: 'duplicate', movie: { tmdb_id: m.id, title: m.title, year: year || null } });
-    }
-  } catch (e) {
-    console.error(e);
-    bad(res, 500, 'server error');
-  }
-});
-
-// Borrar peli (seguro: si hay varias coincidencias, no borra)
-app.post('/gpt/remove', requireGptKey, (req, res) => {
-  const q = String(req.body?.titulo || '').trim();
-  if (!q) return bad(res, 400, 'titulo requerido');
-
-  const matches = db.prepare(`
-    SELECT id, title, year, status
-    FROM movies
-    WHERE title LIKE ?
-    ORDER BY status ASC, id DESC
-    LIMIT 10
-  `).all(`%${q}%`);
-
-  if (matches.length === 0) return bad(res, 404, 'no encontrada');
-  if (matches.length > 1) return bad(res, 409, 'multiple matches', { matches });
-
-  db.prepare(`DELETE FROM movies WHERE id=?`).run(matches[0].id);
-  ok(res, { action: 'removed', movie: { title: matches[0].title, year: matches[0].year || null } });
-});
-
-// Marcar vista
-app.post('/gpt/visto', requireGptKey, (req, res) => {
-  const q = String(req.body?.titulo || '').trim();
-  if (!q) return bad(res, 400, 'titulo requerido');
-
-  const m = db.prepare(`
-    SELECT id, title, year
-    FROM movies
-    WHERE status='pending' AND title LIKE ?
-    ORDER BY added_at DESC
-    LIMIT 1
-  `).get(`%${q}%`);
-
-  if (!m) return bad(res, 404, 'no encontrada pendiente');
-
-  db.prepare(`
-    UPDATE movies
-    SET status='watched', watched_at=datetime('now'), watched_by=?
-    WHERE id=?
-  `).run('gpt', m.id);
-
-  ok(res, { action: 'watched', movie: { title: m.title, year: m.year || null } });
-});
-
-// Qué vemos (anti-repetición)
-app.get('/gpt/quevemos', requireGptKey, (req, res) => {
-  const pendingCount = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='pending'`).get().c;
-  if (pendingCount === 0) return ok(res, { pick: null, message: 'No hay pelis pendientes' });
-
-  const [pick] = pickMoviesSmart(1);
-  if (!pick) return ok(res, { pick: null, message: 'No encontré opciones' });
-
-  markSuggested([pick.tmdb_id]);
-  ok(res, { pick: { tmdb_id: pick.tmdb_id, title: pick.title, year: pick.year || null } });
-});
-
-// Stats
-app.get('/gpt/stats', requireGptKey, (req, res) => {
-  const total = db.prepare(`SELECT COUNT(*) AS c FROM movies`).get().c;
-  const pending = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='pending'`).get().c;
-  const watched = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='watched'`).get().c;
-
-  ok(res, { total, pending, watched });
-});
-
-// Votar (2 modos):
-// 1) manual: { "titulos": "Matrix 1999; Dune 2021; https://www.imdb.com/title/tt0133093/" }
-// 2) automático: { "opciones": 4 }
-app.post('/gpt/votar', requireGptKey, async (req, res) => {
-  try {
-    const channelId = resolveChannelId(req);
-    if (!channelId) return bad(res, 400, 'channel_id requerido (o configura DEFAULT_CHANNEL_ID)');
-
-    const durationMs = Math.max(
-      30_000,
-      Math.min(30 * 60_000, Number(req.body?.duration_ms || VOTE_DURATION_MS || 300_000))
-    );
-
-    const raw = String(req.body?.titulos || '').trim();
-    const opciones = Math.max(2, Math.min(5, Number(req.body?.opciones || VOTE_OPTIONS_DEFAULT || 3)));
-
-    let picked = [];
-    let source = 'db';
-
-    if (raw) {
-      source = 'manual';
-      const items = parseTitles(raw);
-      if (items.length < 2) return bad(res, 400, 'mínimo 2 títulos');
-
-      for (const it of items) {
-        const m = await tmdbResolveMovie(it);
-        if (!m) continue;
-        picked.push({
-          tmdb_id: m.id,
-          title: m.title,
-          year: (m.release_date || '').slice(0, 4) || '',
-        });
-      }
-
-      // dedupe
-      const seen = new Set();
-      picked = picked.filter(x => (seen.has(x.tmdb_id) ? false : (seen.add(x.tmdb_id), true)));
-      picked = picked.slice(0, 5);
-
-      if (picked.length < 2) return bad(res, 404, 'no encontré 2 pelis válidas en TMDB');
-      savePollHistory(picked, 'manual');
-    } else {
-      const pendingCount = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='pending'`).get().c;
-      if (pendingCount < 2) return bad(res, 400, 'necesito al menos 2 pendientes');
-
-      picked = pickMoviesSmart(Math.min(opciones, pendingCount));
-      if (!picked.length) return bad(res, 400, 'no hay pendientes');
-
-      savePollHistory(picked, 'db');
-      markSuggested(picked.map(x => x.tmdb_id));
+    if (!message) {
+      return res.status(400).json({ error: 'Falta el mensaje' });
     }
 
-    const { pollId, messageId } = await createDiscordPoll({ channelId, picked, durationMs });
-
-    ok(res, {
-      action: 'poll_created',
-      source,
-      channel_id: channelId,
-      poll_id: pollId,
-      message_id: messageId,
-      duration_ms: durationMs,
-      options: picked.map((m, i) => ({ n: i + 1, title: m.title, year: m.year || null }))
+    // 👇 RESPUESTA DE PRUEBA (luego será OpenAI)
+    res.json({
+      reply: `🤖 Don Pistacho GPT dice: he recibido "${message}"`,
+      user: user ?? 'anon',
     });
-  } catch (e) {
-    console.error(e);
-    bad(res, 500, e?.message || 'server error');
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error interno del GPT' });
   }
 });
 
+// --- Puerto Railway ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🌐 HTTP server listening on port ${PORT}`);
+});
+
+// =======================
+// DISCORD LOGIN
+// =======================
 client.login(DISCORD_TOKEN);
