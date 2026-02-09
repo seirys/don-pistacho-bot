@@ -918,31 +918,36 @@ client.on('interactionCreate', async (interaction) => {
 const app = express();
 app.use(express.json());
 
-// (Opcional pero recomendado) Mini “API key” para que no te lo use cualquiera.
-// Si NO pones GPT_API_KEY en Railway, no se exige.
+// API KEY opcional (recomendado)
 const { GPT_API_KEY } = process.env;
 function requireKey(req, res) {
   if (!GPT_API_KEY) return true;
   const key = req.headers['x-api-key'];
-  if (key && key === GPT_API_KEY) return true;
+  if (key === GPT_API_KEY) return true;
   res.status(401).json({ ok: false, error: 'Unauthorized' });
   return false;
 }
 
 // Home
-app.get('/', (req, res) => res.status(200).send('Don Pistacho OK ✅'));
+app.get('/', (req, res) => {
+  res.status(200).send('Don Pistacho OK ✅');
+});
 
-// Salud (lo que ya usabas)
-app.get('/health', (req, res) => res.status(200).json({ ok: true, bot: 'Don Pistacho', status: 'online' }));
+// Health (Railway + GPT)
+app.get('/health', (req, res) => {
+  res.status(200).json({ ok: true, bot: 'Don Pistacho', status: 'online' });
+});
 
-// Salud “GPT”
-app.get('/gpt/health', (req, res) => res.status(200).json({ ok: true, bot: 'Don Pistacho', status: 'online' }));
+// ======================
+// GPT ROUTES
+// ======================
 
-// Listar pendientes
-app.get('/gpt/listPending', (req, res) => {
+// LISTAR PENDIENTES
+app.get('/gpt/list', (req, res) => {
   if (!requireKey(req, res)) return;
 
   const limit = Math.max(1, Math.min(300, Number(req.query.limit ?? LIST_LIMIT)));
+
   const rows = db.prepare(`
     SELECT title, year
     FROM movies
@@ -954,85 +959,93 @@ app.get('/gpt/listPending', (req, res) => {
   res.status(200).json({
     ok: true,
     count: rows.length,
-    titles: rows.map(r => formatMovieLine(r)),
+    limit,
+    movies: rows.map(r => ({
+      title: r.title,
+      year: r.year || ''
+    }))
   });
 });
 
-// Añadir peli (título o link IMDb)
-app.post('/gpt/addMovie', async (req, res) => {
+// AÑADIR PELI
+app.post('/gpt/add', async (req, res) => {
   if (!requireKey(req, res)) return;
 
   try {
-    const title = String(req.body?.title ?? '').trim();
-    if (!title) return res.status(400).json({ ok: false, error: 'Missing "title"' });
+    const titulo = String(req.body?.titulo ?? '').trim();
+    if (!titulo) {
+      return res.status(400).json({ ok: false, error: 'Missing titulo' });
+    }
 
-    const m = await tmdbResolveMovie(title);
-    if (!m) return res.status(404).json({ ok: false, error: 'TMDB: not found' });
+    const m = await tmdbResolveMovie(titulo);
+    if (!m) {
+      return res.status(404).json({ ok: false, error: 'TMDB not found' });
+    }
 
     const year = (m.release_date || '').slice(0, 4) || '';
 
     try {
       db.prepare(`
         INSERT INTO movies (tmdb_id, title, year, status, added_by)
-        VALUES (?, ?, ?, 'pending', ?)
-      `).run(m.id, m.title, year, 'gpt');
+        VALUES (?, ?, ?, 'pending', 'gpt')
+      `).run(m.id, m.title, year);
 
-      const imdbId = extractImdbId(title);
-      return res.status(200).json({
+      res.status(200).json({
         ok: true,
-        added: true,
-        movie: formatMovieLine({ title: m.title, year }),
-        via: imdbId ? imdbId : null,
+        added: { tmdb_id: m.id, title: m.title, year }
       });
     } catch {
-      return res.status(200).json({
+      res.status(200).json({
         ok: true,
-        added: false,
-        error: 'already_in_list',
-        movie: formatMovieLine({ title: m.title, year }),
+        existing: { tmdb_id: m.id, title: m.title, year }
       });
     }
-  } catch (e) {
-    console.error('gpt/addMovie error:', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+  } catch (err) {
+    console.error('GPT ADD ERROR:', err);
+    res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// Eliminar peli (si hay varias coincidencias, devuelve opciones y NO borra)
-app.post('/gpt/removeMovie', (req, res) => {
+// ELIMINAR PELI
+app.post('/gpt/remove', (req, res) => {
   if (!requireKey(req, res)) return;
 
   try {
-    const query = String(req.body?.query ?? '').trim();
-    if (!query) return res.status(400).json({ ok: false, error: 'Missing "query"' });
+    const titulo = String(req.body?.titulo ?? '').trim();
+    if (!titulo) {
+      return res.status(400).json({ ok: false, error: 'Missing titulo' });
+    }
 
     const matches = db.prepare(`
       SELECT id, title, year, status
       FROM movies
       WHERE title LIKE ?
-      ORDER BY status ASC, id DESC
+      ORDER BY id DESC
       LIMIT 10
-    `).all(`%${query}%`);
+    `).all(`%${titulo}%`);
 
-    if (matches.length === 0) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (matches.length === 0) {
+      return res.status(200).json({ ok: false, error: 'not_found', matches: [] });
+    }
 
     if (matches.length > 1) {
       return res.status(200).json({
         ok: false,
         error: 'multiple_matches',
-        matches: matches.map(m => ({ id: m.id, title: formatMovieLine(m), status: m.status })),
+        matches
       });
     }
 
     db.prepare(`DELETE FROM movies WHERE id=?`).run(matches[0].id);
-    return res.status(200).json({ ok: true, removed: true, movie: formatMovieLine(matches[0]) });
-  } catch (e) {
-    console.error('gpt/removeMovie error:', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+    res.status(200).json({ ok: true, removed: matches[0] });
+
+  } catch (err) {
+    console.error('GPT REMOVE ERROR:', err);
+    res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// Stats
+// STATS
 app.get('/gpt/stats', (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -1041,12 +1054,19 @@ app.get('/gpt/stats', (req, res) => {
     const pending = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='pending'`).get().c;
     const watched = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='watched'`).get().c;
 
-    return res.status(200).json({ ok: true, total, pending, watched });
-  } catch (e) {
-    console.error('gpt/stats error:', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+    res.status(200).json({ ok: true, total, pending, watched });
+  } catch (err) {
+    console.error('GPT STATS ERROR:', err);
+    res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
+// Railway PORT
+const PORT = Number(process.env.PORT || 8080);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌐 HTTP server listening on ${PORT}`);
+});
+
 
 // Railway: escucha en el PORT que te da Railway (y si no, 8080)
 const PORT = Number(process.env.PORT || 8080);
