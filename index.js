@@ -374,39 +374,51 @@ await rest.put(Routes.applicationGuildCommands(DISCORD_APP_ID, GUILD_ID), { body
 console.log('✅ Comandos registrados para este servidor');
 
 /* ======================
-   CLIENT
+   CLIENT (Discord + menciones)
 ====================== */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 client.polls = new Map();
 
-client.once('ready', () => console.log(`🤖 Don Pistacho conectado como ${client.user.tag}`));
-client.on('messageCreate', (message) => {
-  // Ignorar bots
-  if (message.author.bot) return;
+client.once('ready', () => {
+  console.log(`🤖 Don Pistacho conectado como ${client.user.tag}`);
+});
 
-  // Si mencionan al bot
-  if (message.mentions.has(client.user)) {
+// Responder si mencionan al bot
+client.on('messageCreate', async (message) => {
+  try {
+    // Ignorar bots
+    if (message.author.bot) return;
+
+    // Si no mencionan al bot, no hacemos nada
+    if (!message.mentions?.users?.has(client.user.id)) return;
+
+    // (Opcional) evitar responder si es un comando tipo "/algo"
+    if (message.content?.trim().startsWith('/')) return;
+
     const frases = [
       '👀 ¿No tendrás 50 eurillos para mangarte?',
       '🍿 ¿Te gustan de terror? Se te acabó el pienso y son las 3 AM.',
-      '🎩 A ver si aprendemos a decidirnos, que no sois los que tenéis 7 vidas. Elige ya, lenteja',
-      '😎 ¿Y si te pones una peli y dejas el atún sin supervisión? Pregunto por... un amigo."',
-      '🎬 ¿Otra peli? A este ritmo vas a oler más a sofá que yo Pardolín.'
+      '🎬 A ver si aprendemos a decidirnos, que no sois los que tenéis 7 vidas. Elige ya, lenteja',
+      '😼 ¿Y si te pones una peli y dejas el atún sin supervisión? Pregunto por... un amigo.',
+      '🎞️ ¿Otra peli? A este ritmo vas a oler más a sofá que yo Pardolín.',
     ];
 
     const frase = frases[Math.floor(Math.random() * frases.length)];
 
     // Responder mencionando a la persona
-    message.reply(`${message.author} ${frase}`);
+    await message.reply(`${message.author} ${frase}`);
+  } catch (e) {
+    console.error('Error en messageCreate:', e);
   }
 });
+
 
 
 /* ======================
