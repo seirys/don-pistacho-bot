@@ -918,36 +918,35 @@ client.on('interactionCreate', async (interaction) => {
 const app = express();
 app.use(express.json());
 
-// API KEY opcional (recomendado)
-const { GPT_API_KEY } = process.env;
+// Mini “API key” opcional.
+// Si NO configuras GPT_API_KEY en Railway, no se exige nada.
+const { GPT_API_KEY, GPT_CHANNEL_ID } = process.env;
+
 function requireKey(req, res) {
   if (!GPT_API_KEY) return true;
   const key = req.headers['x-api-key'];
-  if (key === GPT_API_KEY) return true;
-  res.status(401).json({ ok: false, error: 'Unauthorized' });
+  if (key && key === GPT_API_KEY) return true;
+  res.status(401).json({ ok: false, error: 'Unauthorized (missing/invalid x-api-key)' });
   return false;
 }
 
 // Home
-app.get('/', (req, res) => {
-  res.status(200).send('Don Pistacho OK ✅');
-});
+app.get('/', (req, res) => res.status(200).send('Don Pistacho OK ✅'));
 
-// Health (Railway + GPT)
-app.get('/health', (req, res) => {
-  res.status(200).json({ ok: true, bot: 'Don Pistacho', status: 'online' });
-});
+// Salud
+app.get('/health', (req, res) =>
+  res.status(200).json({ ok: true, bot: 'Don Pistacho', status: 'online' })
+);
 
 // ======================
-// GPT ROUTES
+// GPT ENDPOINTS
 // ======================
 
-// LISTAR PENDIENTES
+// LIST: GET /gpt/list?limit=...
 app.get('/gpt/list', (req, res) => {
   if (!requireKey(req, res)) return;
 
   const limit = Math.max(1, Math.min(300, Number(req.query.limit ?? LIST_LIMIT)));
-
   const rows = db.prepare(`
     SELECT title, year
     FROM movies
@@ -960,92 +959,256 @@ app.get('/gpt/list', (req, res) => {
     ok: true,
     count: rows.length,
     limit,
-    movies: rows.map(r => ({
-      title: r.title,
-      year: r.year || ''
-    }))
+    movies: rows.map(r => ({ title: r.title, year: r.year || '' })),
   });
 });
 
-// AÑADIR PELI
+// ADD: POST /gpt/add  { titulo: "..." }
 app.post('/gpt/add', async (req, res) => {
   if (!requireKey(req, res)) return;
 
   try {
     const titulo = String(req.body?.titulo ?? '').trim();
-    if (!titulo) {
-      return res.status(400).json({ ok: false, error: 'Missing titulo' });
-    }
+    if (!titulo) return res.status(400).json({ ok: false, error: 'Missing "titulo"' });
 
     const m = await tmdbResolveMovie(titulo);
-    if (!m) {
-      return res.status(404).json({ ok: false, error: 'TMDB not found' });
-    }
+    if (!m) return res.status(404).json({ ok: false, error: 'TMDB: not found' });
 
     const year = (m.release_date || '').slice(0, 4) || '';
 
     try {
       db.prepare(`
         INSERT INTO movies (tmdb_id, title, year, status, added_by)
-        VALUES (?, ?, ?, 'pending', 'gpt')
-      `).run(m.id, m.title, year);
+        VALUES (?, ?, ?, 'pending', ?)
+      `).run(m.id, m.title, year, 'gpt');
 
-      res.status(200).json({
+      const imdbId = extractImdbId(titulo);
+      return res.status(200).json({
         ok: true,
-        added: { tmdb_id: m.id, title: m.title, year }
+        added: { tmdb_id: m.id, title: m.title, year },
+        info: imdbId ? `via IMDb: ${imdbId}` : 'added',
       });
     } catch {
-      res.status(200).json({
+      return res.status(200).json({
         ok: true,
-        existing: { tmdb_id: m.id, title: m.title, year }
+        existing: { tmdb_id: m.id, title: m.title, year },
+        info: 'already_in_list',
       });
     }
-  } catch (err) {
-    console.error('GPT ADD ERROR:', err);
-    res.status(500).json({ ok: false, error: 'server_error' });
+  } catch (e) {
+    console.error('POST /gpt/add error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// ELIMINAR PELI
+// REMOVE: POST /gpt/remove  { titulo: "..." }
 app.post('/gpt/remove', (req, res) => {
   if (!requireKey(req, res)) return;
 
   try {
     const titulo = String(req.body?.titulo ?? '').trim();
-    if (!titulo) {
-      return res.status(400).json({ ok: false, error: 'Missing titulo' });
-    }
+    if (!titulo) return res.status(400).json({ ok: false, error: 'Missing "titulo"' });
 
     const matches = db.prepare(`
       SELECT id, title, year, status
       FROM movies
       WHERE title LIKE ?
-      ORDER BY id DESC
+      ORDER BY status ASC, id DESC
       LIMIT 10
     `).all(`%${titulo}%`);
 
-    if (matches.length === 0) {
-      return res.status(200).json({ ok: false, error: 'not_found', matches: [] });
-    }
+    if (matches.length === 0) return res.status(200).json({ ok: false, error: 'not_found' });
 
     if (matches.length > 1) {
       return res.status(200).json({
         ok: false,
         error: 'multiple_matches',
-        matches
+        matches: matches.map(m => ({
+          id: m.id,
+          title: m.title,
+          year: m.year || '',
+          status: m.status,
+        })),
       });
     }
 
-    db.prepare(`DELETE FROM movies WHERE id=?`).run(matches[0].id);
-    res.status(200).json({ ok: true, removed: matches[0] });
+    const one = matches[0];
+    db.prepare(`DELETE FROM movies WHERE id=?`).run(one.id);
 
-  } catch (err) {
-    console.error('GPT REMOVE ERROR:', err);
-    res.status(500).json({ ok: false, error: 'server_error' });
+    return res.status(200).json({
+      ok: true,
+      removed: { id: one.id, title: one.title, year: one.year || '', status: one.status },
+    });
+  } catch (e) {
+    console.error('POST /gpt/remove error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// STATS
+// VISTO: POST /gpt/visto  { titulo: "..." }
+app.post('/gpt/visto', (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  try {
+    const titulo = String(req.body?.titulo ?? '').trim();
+    if (!titulo) return res.status(400).json({ ok: false, error: 'Missing "titulo"' });
+
+    const m = db.prepare(`
+      SELECT id, title, year
+      FROM movies
+      WHERE status='pending' AND title LIKE ?
+      ORDER BY added_at DESC
+      LIMIT 1
+    `).get(`%${titulo}%`);
+
+    if (!m) return res.status(200).json({ ok: false, error: 'not_found' });
+
+    db.prepare(`
+      UPDATE movies
+      SET status='watched', watched_at=datetime('now'), watched_by=?
+      WHERE id=?
+    `).run('gpt', m.id);
+
+    return res.status(200).json({
+      ok: true,
+      watched: { id: m.id, title: m.title, year: m.year || '' },
+    });
+  } catch (e) {
+    console.error('POST /gpt/visto error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// QUEVEMOS: POST /gpt/quevemos
+app.post('/gpt/quevemos', (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  try {
+    const pendingCount = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='pending'`).get().c;
+    if (pendingCount === 0) return res.status(200).json({ ok: false, error: 'no_pending' });
+
+    const [pick] = pickMoviesSmart(1);
+    if (!pick) return res.status(200).json({ ok: false, error: 'no_pick' });
+
+    markSuggested([pick.tmdb_id]);
+
+    return res.status(200).json({
+      ok: true,
+      pick: { tmdb_id: pick.tmdb_id, title: pick.title, year: pick.year || '' },
+    });
+  } catch (e) {
+    console.error('POST /gpt/quevemos error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// VOTAR: POST /gpt/votar  { titulos: ["...","..."], duration_ms?: 600000 }
+app.post('/gpt/votar', async (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  try {
+    const titulos = Array.isArray(req.body?.titulos) ? req.body.titulos : [];
+    if (titulos.length < 2) return res.status(400).json({ ok: false, error: 'Need at least 2 titles' });
+
+    const durationMs = Math.max(30_000, Number(req.body?.duration_ms ?? VOTE_DURATION_MS));
+    const items = titulos.slice(0, 5);
+
+    // Resuelve títulos/IMDb -> TMDB
+    let picked = [];
+    for (const it of items) {
+      const m = await tmdbResolveMovie(String(it));
+      if (!m) continue;
+      picked.push({
+        tmdb_id: m.id,
+        title: m.title,
+        year: (m.release_date || '').slice(0, 4) || '',
+      });
+    }
+
+    // Quita duplicados
+    const seen = new Set();
+    picked = picked.filter(x => (seen.has(x.tmdb_id) ? false : (seen.add(x.tmdb_id), true)));
+
+    if (picked.length < 2) return res.status(200).json({ ok: false, error: 'tmdb_not_enough_results' });
+
+    // Si no hay canal configurado, solo devuelve la selección (igual sirve para GPT)
+    if (!GPT_CHANNEL_ID) {
+      return res.status(200).json({
+        ok: true,
+        poll: { count: picked.length, titles: picked.map(m => formatMovieLine(m)) },
+      });
+    }
+
+    // Enviar votación al canal
+    const channel = await client.channels.fetch(GPT_CHANNEL_ID).catch(() => null);
+    if (!channel) {
+      return res.status(200).json({ ok: false, error: 'invalid_GPT_CHANNEL_ID' });
+    }
+
+    const pollId = `${GPT_CHANNEL_ID}-${Date.now()}`;
+    const poll = { id: pollId, movies: picked, userVotes: new Map(), closed: false };
+    client.polls.set(pollId, poll);
+
+    const embed = new EmbedBuilder()
+      .setTitle('🗳️ Votación de peli (lanzada por GPT)')
+      .setDescription(picked.map((m, i) => `**${i + 1}.** ${formatMovieLine(m)} — 🗳️ **0**`).join('\n'))
+      .setFooter({ text: `Dura ${Math.round(durationMs / 1000)}s • Puedes cambiar tu voto` });
+
+    const row = new ActionRowBuilder().addComponents(
+      ...picked.map((_, i) =>
+        new ButtonBuilder()
+          .setCustomId(`vote:${pollId}:${i + 1}`)
+          .setLabel(String(i + 1))
+          .setStyle(ButtonStyle.Primary)
+      )
+    );
+
+    const msg = await channel.send({ embeds: [embed], components: [row] });
+
+    setTimeout(async () => {
+      const p = client.polls.get(pollId);
+      if (!p || p.closed) return;
+      p.closed = true;
+
+      const counts = {};
+      for (let i = 1; i <= p.movies.length; i++) counts[String(i)] = 0;
+      for (const v of p.userVotes.values()) counts[v]++;
+
+      let best = '1';
+      for (let i = 2; i <= p.movies.length; i++) {
+        const k = String(i);
+        if (counts[k] > counts[best]) best = k;
+      }
+      const winner = p.movies[Number(best) - 1];
+
+      const finalLines = p.movies.map((m, i) => {
+        const k = String(i + 1);
+        return `**${k}.** ${formatMovieLine(m)} — 🗳️ **${counts[k]}**`;
+      }).join('\n');
+
+      const finalEmbed = new EmbedBuilder()
+        .setTitle('🗳️ Votación cerrada')
+        .setDescription(finalLines)
+        .addFields({ name: '🎬 Ganadora', value: `**${formatMovieLine(winner)}**` });
+
+      const disabledRow = new ActionRowBuilder().addComponents(
+        row.components.map(b => ButtonBuilder.from(b).setDisabled(true))
+      );
+
+      try { await msg.edit({ embeds: [finalEmbed], components: [disabledRow] }); } catch {}
+    }, durationMs);
+
+    return res.status(200).json({
+      ok: true,
+      poll: { count: picked.length, titles: picked.map(m => formatMovieLine(m)) },
+    });
+  } catch (e) {
+    console.error('POST /gpt/votar error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// STATS: GET /gpt/stats
 app.get('/gpt/stats', (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -1054,24 +1217,16 @@ app.get('/gpt/stats', (req, res) => {
     const pending = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='pending'`).get().c;
     const watched = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='watched'`).get().c;
 
-    res.status(200).json({ ok: true, total, pending, watched });
-  } catch (err) {
-    console.error('GPT STATS ERROR:', err);
-    res.status(500).json({ ok: false, error: 'server_error' });
+    return res.status(200).json({ ok: true, total, pending, watched });
+  } catch (e) {
+    console.error('GET /gpt/stats error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// Railway PORT
-const PORT = Number(process.env.PORT || 8080);
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 HTTP server listening on ${PORT}`);
-});
-
-
-// Railway: escucha en el PORT que te da Railway (y si no, 8080)
+// Railway: escucha el PORT que te da Railway (si no, 8080)
 const PORT = Number(process.env.PORT || 8080);
 app.listen(PORT, '0.0.0.0', () => console.log(`🌐 HTTP server listening on ${PORT}`));
-
 
 
 // =======================
