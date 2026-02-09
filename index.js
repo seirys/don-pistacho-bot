@@ -374,8 +374,9 @@ await rest.put(Routes.applicationGuildCommands(DISCORD_APP_ID, GUILD_ID), { body
 console.log('✅ Comandos registrados para este servidor');
 
 /* ======================
-   CLIENT (Discord + menciones)
+   CLIENT (RESPONDE A MENCIONES)
 ====================== */
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -386,36 +387,32 @@ const client = new Client({
 
 client.polls = new Map();
 
-client.once('ready', () => {
+// ✅ Evento correcto en discord.js v14+
+client.once('clientReady', () => {
   console.log(`🤖 Don Pistacho conectado como ${client.user.tag}`);
 });
 
-// Responder si mencionan al bot
 client.on('messageCreate', async (message) => {
-  try {
-    // Ignorar bots
-    if (message.author.bot) return;
+  // Ignorar bots
+  if (message.author.bot) return;
 
-    // Si no mencionan al bot, no hacemos nada
-    if (!message.mentions?.users?.has(client.user.id)) return;
-
-    // (Opcional) evitar responder si es un comando tipo "/algo"
-    if (message.content?.trim().startsWith('/')) return;
-
+  // Si mencionan al bot
+  if (message.mentions.has(client.user)) {
     const frases = [
-      '👀 ¿No tendrás 50 eurillos para mangarte?',
-      '🍿 ¿Te gustan de terror? Se te acabó el pienso y son las 3 AM.',
-      '🎬 A ver si aprendemos a decidirnos, que no sois los que tenéis 7 vidas. Elige ya, lenteja',
-      '😼 ¿Y si te pones una peli y dejas el atún sin supervisión? Pregunto por... un amigo.',
-      '🎞️ ¿Otra peli? A este ritmo vas a oler más a sofá que yo Pardolín.',
+      '🫒 ¿No tendrás 50 eurillos para mangarte?',
+      '🎃 ¿Te gustan de terror? Se te acabó el pienso y son las 3 AM.',
+      '🍿 A ver si aprendemos a decidirnos, que no sois los que tenéis 7 vidas. Elige ya, lenteja.',
+      '🐟 ¿Y si te pones una peli y dejas el atún sin supervisión? Pregunto por... un amigo.',
+      '🎬 ¿Otra peli? A este ritmo vas a oler más a sofá que yo Pardolín.',
     ];
 
     const frase = frases[Math.floor(Math.random() * frases.length)];
 
-    // Responder mencionando a la persona
-    await message.reply(`${message.author} ${frase}`);
-  } catch (e) {
-    console.error('Error en messageCreate:', e);
+    // ✅ Responder mencionando a la persona
+    await message.reply({
+      content: `${message.author} ${frase}`,
+      allowedMentions: { repliedUser: true },
+    });
   }
 });
 
