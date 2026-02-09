@@ -380,6 +380,27 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 client.polls = new Map();
 
 client.once('ready', () => console.log(`🤖 Don Pistacho conectado como ${client.user.tag}`));
+client.on('messageCreate', (message) => {
+  // Ignorar bots
+  if (message.author.bot) return;
+
+  // Si mencionan al bot
+  if (message.mentions.has(client.user)) {
+    const frases = [
+      '👀 ¿No tendrás 50 eurillos para mangarte?',
+      '🍿 ¿Te gustan de terror? Se te acabó el pienso y son las 3 AM.',
+      '🎩 A ver si aprendemos a decidirnos, que no sois los que tenéis 7 vidas. Elige ya, lenteja',
+      '😎 ¿Y si te pones una peli y dejas el atún sin supervisión? Pregunto por... un amigo."',
+      '🎬 ¿Otra peli? A este ritmo vas a oler más a sofá que yo.'
+    ];
+
+    const frase = frases[Math.floor(Math.random() * frases.length)];
+
+    // Responder mencionando a la persona
+    message.reply(`${message.author} ${frase}`);
+  }
+});
+
 
 /* ======================
    SAFE REPLY (evita 40060)
@@ -875,53 +896,18 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// =======================
-// HTTP SERVER (GPT API)
-// =======================
+// ======================
+// HTTP SERVER (GPT + Railway)
+// ======================
 const app = express();
 app.use(express.json());
 
-// --- Health check (Railway / uptime) ---
-app.get('/health', (req, res) => {
-  res.json({
-    ok: true,
-    bot: 'Don Pistacho',
-    status: 'online',
-    time: new Date().toISOString(),
-  });
-});
+app.get('/', (req, res) => res.status(200).send('Don Pistacho OK ✅'));
+app.get('/health', (req, res) => res.status(200).json({ ok: true, bot: 'Don Pistacho', status: 'online' }));
 
-// --- Endpoint base (prueba) ---
-app.get('/', (req, res) => {
-  res.send('🍿 Don Pistacho está vivo y listo para el GPT');
-});
+const PORT = Number(process.env.PORT || 8080);
+app.listen(PORT, '0.0.0.0', () => console.log(`🌐 HTTP server listening on ${PORT}`));
 
-// --- Endpoint GPT (aquí conectaremos OpenAI luego) ---
-app.post('/gpt', async (req, res) => {
-  try {
-    const { message, user } = req.body;
-
-    if (!message) {
-      return res.status(400).json({ error: 'Falta el mensaje' });
-    }
-
-    // 👇 RESPUESTA DE PRUEBA (luego será OpenAI)
-    res.json({
-      reply: `🤖 Don Pistacho GPT dice: he recibido "${message}"`,
-      user: user ?? 'anon',
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Error interno del GPT' });
-  }
-});
-
-// --- Puerto Railway ---
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🌐 HTTP server listening on port ${PORT}`);
-});
 
 // =======================
 // DISCORD LOGIN
