@@ -376,7 +376,14 @@ console.log('✅ Comandos registrados para este servidor');
 /* ======================
    CLIENT
 ====================== */
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
+});
+
 client.polls = new Map();
 
 client.once('ready', () => console.log(`🤖 Don Pistacho conectado como ${client.user.tag}`));
@@ -391,7 +398,7 @@ client.on('messageCreate', (message) => {
       '🍿 ¿Te gustan de terror? Se te acabó el pienso y son las 3 AM.',
       '🎩 A ver si aprendemos a decidirnos, que no sois los que tenéis 7 vidas. Elige ya, lenteja',
       '😎 ¿Y si te pones una peli y dejas el atún sin supervisión? Pregunto por... un amigo."',
-      '🎬 ¿Otra peli? A este ritmo vas a oler más a sofá que yo.'
+      '🎬 ¿Otra peli? A este ritmo vas a oler más a sofá que yo Pardolín.'
     ];
 
     const frase = frases[Math.floor(Math.random() * frases.length)];
