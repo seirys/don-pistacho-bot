@@ -918,23 +918,56 @@ client.on('interactionCreate', async (interaction) => {
 const app = express();
 app.use(express.json());
 
+// (Opcional pero recomendado) Mini “API key” para que no te lo use cualquiera.
+// Si NO pones GPT_API_KEY en Railway, no se exige.
+const { GPT_API_KEY } = process.env;
+function requireKey(req, res) {
+  if (!GPT_API_KEY) return true;
+  const key = req.headers['x-api-key'];
+  if (key && key === GPT_API_KEY) return true;
+  res.status(401).json({ ok: false, error: 'Unauthorized' });
+  return false;
+}
+
+// Home
 app.get('/', (req, res) => res.status(200).send('Don Pistacho OK ✅'));
+
+// Salud (lo que ya usabas)
 app.get('/health', (req, res) => res.status(200).json({ ok: true, bot: 'Don Pistacho', status: 'online' }));
 
-const PORT = Number(process.env.PORT || 8080);
-// =======================
-// GPT API
-// =======================
+// Salud “GPT”
+app.get('/gpt/health', (req, res) => res.status(200).json({ ok: true, bot: 'Don Pistacho', status: 'online' }));
 
-// POST /gpt/add  { titulo: "Matrix 1999" }  o link IMDb
-app.post('/gpt/add', async (req, res) => {
+// Listar pendientes
+app.get('/gpt/listPending', (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const limit = Math.max(1, Math.min(300, Number(req.query.limit ?? LIST_LIMIT)));
+  const rows = db.prepare(`
+    SELECT title, year
+    FROM movies
+    WHERE status='pending'
+    ORDER BY added_at DESC
+    LIMIT ?
+  `).all(limit);
+
+  res.status(200).json({
+    ok: true,
+    count: rows.length,
+    titles: rows.map(r => formatMovieLine(r)),
+  });
+});
+
+// Añadir peli (título o link IMDb)
+app.post('/gpt/addMovie', async (req, res) => {
+  if (!requireKey(req, res)) return;
+
   try {
-    if (!requireGptAuth(req, res)) return;
-    const { titulo } = req.body || {};
-    if (!titulo) return res.status(400).json({ ok: false, error: 'Falta "titulo"' });
+    const title = String(req.body?.title ?? '').trim();
+    if (!title) return res.status(400).json({ ok: false, error: 'Missing "title"' });
 
-    const m = await tmdbResolveMovie(titulo);
-    if (!m) return res.json({ ok: false, error: 'No encontrada en TMDB/IMDb' });
+    const m = await tmdbResolveMovie(title);
+    if (!m) return res.status(404).json({ ok: false, error: 'TMDB: not found' });
 
     const year = (m.release_date || '').slice(0, 4) || '';
 
@@ -944,47 +977,34 @@ app.post('/gpt/add', async (req, res) => {
         VALUES (?, ?, ?, 'pending', ?)
       `).run(m.id, m.title, year, 'gpt');
 
-      await postToGptChannel({ content: `🤖🎬 He añadido: **${m.title}** ${year ? `(${year})` : ''}` });
-      return res.json({ ok: true, added: { tmdb_id: m.id, title: m.title, year } });
+      const imdbId = extractImdbId(title);
+      return res.status(200).json({
+        ok: true,
+        added: true,
+        movie: formatMovieLine({ title: m.title, year }),
+        via: imdbId ? imdbId : null,
+      });
     } catch {
-      return res.json({ ok: true, info: 'Ya estaba en la lista', existing: { tmdb_id: m.id, title: m.title, year } });
+      return res.status(200).json({
+        ok: true,
+        added: false,
+        error: 'already_in_list',
+        movie: formatMovieLine({ title: m.title, year }),
+      });
     }
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: 'Server error' });
+    console.error('gpt/addMovie error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// GET /gpt/list
-app.get('/gpt/list', async (req, res) => {
+// Eliminar peli (si hay varias coincidencias, devuelve opciones y NO borra)
+app.post('/gpt/removeMovie', (req, res) => {
+  if (!requireKey(req, res)) return;
+
   try {
-    if (!requireGptAuth(req, res)) return;
-
-    const rows = db.prepare(`
-      SELECT title, year FROM movies
-      WHERE status='pending'
-      ORDER BY added_at DESC
-      LIMIT ?
-    `).all(LIST_LIMIT);
-
-    res.json({
-      ok: true,
-      count: rows.length,
-      limit: LIST_LIMIT,
-      movies: rows
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: 'Server error' });
-  }
-});
-
-// POST /gpt/remove  { titulo: "Matrix" }
-app.post('/gpt/remove', async (req, res) => {
-  try {
-    if (!requireGptAuth(req, res)) return;
-    const { titulo } = req.body || {};
-    if (!titulo) return res.status(400).json({ ok: false, error: 'Falta "titulo"' });
+    const query = String(req.body?.query ?? '').trim();
+    if (!query) return res.status(400).json({ ok: false, error: 'Missing "query"' });
 
     const matches = db.prepare(`
       SELECT id, title, year, status
@@ -992,176 +1012,46 @@ app.post('/gpt/remove', async (req, res) => {
       WHERE title LIKE ?
       ORDER BY status ASC, id DESC
       LIMIT 10
-    `).all(`%${titulo}%`);
+    `).all(`%${query}%`);
 
-    if (matches.length === 0) return res.json({ ok: false, error: 'No hay coincidencias' });
-    if (matches.length > 1) return res.json({ ok: false, error: 'Demasiadas coincidencias', matches });
+    if (matches.length === 0) return res.status(404).json({ ok: false, error: 'not_found' });
+
+    if (matches.length > 1) {
+      return res.status(200).json({
+        ok: false,
+        error: 'multiple_matches',
+        matches: matches.map(m => ({ id: m.id, title: formatMovieLine(m), status: m.status })),
+      });
+    }
 
     db.prepare(`DELETE FROM movies WHERE id=?`).run(matches[0].id);
-    await postToGptChannel({ content: `🗑️🤖 He eliminado: **${matches[0].title}** ${matches[0].year ? `(${matches[0].year})` : ''}` });
-
-    res.json({ ok: true, removed: matches[0] });
+    return res.status(200).json({ ok: true, removed: true, movie: formatMovieLine(matches[0]) });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: 'Server error' });
+    console.error('gpt/removeMovie error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// POST /gpt/visto  { titulo: "Matrix" }
-app.post('/gpt/visto', async (req, res) => {
+// Stats
+app.get('/gpt/stats', (req, res) => {
+  if (!requireKey(req, res)) return;
+
   try {
-    if (!requireGptAuth(req, res)) return;
-    const { titulo } = req.body || {};
-    if (!titulo) return res.status(400).json({ ok: false, error: 'Falta "titulo"' });
-
-    const m = db.prepare(`
-      SELECT id, title, year
-      FROM movies
-      WHERE status='pending' AND title LIKE ?
-      ORDER BY added_at DESC
-      LIMIT 1
-    `).get(`%${titulo}%`);
-
-    if (!m) return res.json({ ok: false, error: 'No encontré pendiente que coincida' });
-
-    db.prepare(`
-      UPDATE movies
-      SET status='watched', watched_at=datetime('now'), watched_by=?
-      WHERE id=?
-    `).run('gpt', m.id);
-
-    await postToGptChannel({ content: `✅🤖 Marcada como vista: **${m.title}** ${m.year ? `(${m.year})` : ''}` });
-    res.json({ ok: true, watched: m });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: 'Server error' });
-  }
-});
-
-// POST /gpt/quevemos
-app.post('/gpt/quevemos', async (req, res) => {
-  try {
-    if (!requireGptAuth(req, res)) return;
-
-    const pendingCount = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='pending'`).get().c;
-    if (pendingCount === 0) return res.json({ ok: false, error: 'No hay pelis pendientes' });
-
-    const [pick] = pickMoviesSmart(1);
-    if (!pick) return res.json({ ok: false, error: 'No encontré opciones' });
-
-    markSuggested([pick.tmdb_id]);
-
-    await postToGptChannel({ content: `🍿🤖 Hoy vemos: **${pick.title}** ${pick.year ? `(${pick.year})` : ''}` });
-    res.json({ ok: true, pick });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: 'Server error' });
-  }
-});
-
-// POST /gpt/votar  { titulos: ["Matrix 1999","Alien"], duration_ms?: 600000 }
-app.post('/gpt/votar', async (req, res) => {
-  try {
-    if (!requireGptAuth(req, res)) return;
-
-    const { titulos, duration_ms } = req.body || {};
-    if (!Array.isArray(titulos) || titulos.length < 2) {
-      return res.status(400).json({ ok: false, error: 'titulos debe ser array con mínimo 2' });
-    }
-
-    let picked = [];
-    for (const t of titulos.slice(0, 5)) {
-      const m = await tmdbResolveMovie(t);
-      if (!m) continue;
-      picked.push({ tmdb_id: m.id, title: m.title, year: (m.release_date || '').slice(0, 4) || '' });
-    }
-
-    // quitar duplicados
-    const seen = new Set();
-    picked = picked.filter(x => (seen.has(x.tmdb_id) ? false : (seen.add(x.tmdb_id), true)));
-
-    if (picked.length < 2) return res.json({ ok: false, error: 'No pude resolver 2 pelis en TMDB/IMDb' });
-
-    savePollHistory(picked, 'gpt');
-    markSuggested(picked.map(x => x.tmdb_id));
-
-    const pollId = `gpt-${Date.now()}`;
-    const poll = { id: pollId, movies: picked, userVotes: new Map(), closed: false };
-    client.polls.set(pollId, poll);
-
-    const embed = new EmbedBuilder()
-      .setTitle('🗳️ Votación de peli (por GPT)')
-      .setDescription(picked.map((m, i) => `**${i + 1}.** ${formatMovieLine(m)} — 🗳️ **0**`).join('\n'))
-      .setFooter({ text: `Dura ${Math.round((Number(duration_ms) || VOTE_DURATION_MS) / 1000)}s • Puedes cambiar tu voto` });
-
-    const row = new ActionRowBuilder().addComponents(
-      ...picked.map((_, i) =>
-        new ButtonBuilder()
-          .setCustomId(`vote:${pollId}:${i + 1}`)
-          .setLabel(String(i + 1))
-          .setStyle(ButtonStyle.Primary)
-      )
-    );
-
-    const msg = await postToGptChannel({ embeds: [embed], components: [row] });
-
-    setTimeout(async () => {
-      const p = client.polls.get(pollId);
-      if (!p || p.closed) return;
-      p.closed = true;
-
-      const counts = {};
-      for (let i = 1; i <= p.movies.length; i++) counts[String(i)] = 0;
-      for (const v of p.userVotes.values()) counts[v]++;
-
-      let best = '1';
-      for (let i = 2; i <= p.movies.length; i++) {
-        const k = String(i);
-        if (counts[k] > counts[best]) best = k;
-      }
-      const winner = p.movies[Number(best) - 1];
-
-      const finalLines = p.movies.map((m, i) => {
-        const k = String(i + 1);
-        return `**${k}.** ${formatMovieLine(m)} — 🗳️ **${counts[k]}**`;
-      }).join('\n');
-
-      const finalEmbed = new EmbedBuilder()
-        .setTitle('🗳️ Votación cerrada (GPT)')
-        .setDescription(finalLines)
-        .addFields({ name: '🎬 Ganadora', value: `**${formatMovieLine(winner)}**` });
-
-      const disabledRow = new ActionRowBuilder().addComponents(
-        row.components.map(b => ButtonBuilder.from(b).setDisabled(true))
-      );
-
-      try { await msg.edit({ embeds: [finalEmbed], components: [disabledRow] }); } catch {}
-    }, Number(duration_ms) || VOTE_DURATION_MS);
-
-    res.json({ ok: true, poll: { count: picked.length, titles: picked.map(x => formatMovieLine(x)) } });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: 'Server error' });
-  }
-});
-
-// GET /gpt/stats
-app.get('/gpt/stats', async (req, res) => {
-  try {
-    if (!requireGptAuth(req, res)) return;
-
     const total = db.prepare(`SELECT COUNT(*) AS c FROM movies`).get().c;
     const pending = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='pending'`).get().c;
     const watched = db.prepare(`SELECT COUNT(*) AS c FROM movies WHERE status='watched'`).get().c;
 
-    res.json({ ok: true, total, pending, watched });
+    return res.status(200).json({ ok: true, total, pending, watched });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: 'Server error' });
+    console.error('gpt/stats error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
+// Railway: escucha en el PORT que te da Railway (y si no, 8080)
+const PORT = Number(process.env.PORT || 8080);
 app.listen(PORT, '0.0.0.0', () => console.log(`🌐 HTTP server listening on ${PORT}`));
+
 
 
 // =======================
