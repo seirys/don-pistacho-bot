@@ -1229,6 +1229,13 @@ const PORT = Number(process.env.PORT || 8080);
 app.listen(PORT, '0.0.0.0', () => console.log(`🌐 HTTP server listening on ${PORT}`));
 
 
+// ======================
+// DISCORD LOGIN
+// ======================
+client.login(DISCORD_TOKEN);
+
+
+
 // =======================
 // DISCORD LOGIN
 // =======================
