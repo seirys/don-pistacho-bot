@@ -1227,14 +1227,31 @@ app.get('/gpt/stats', (req, res) => {
 // Railway: escucha el PORT que te da Railway (si no, 8080)
 const PORT = Number(process.env.PORT || 8080);
 app.listen(PORT, '0.0.0.0', () => console.log(`🌐 HTTP server listening on ${PORT}`));
+// DECIR: POST /gpt/decir  { mensaje: "..." }
+app.post('/gpt/decir', async (req, res) => {
+  if (!requireKey(req, res)) return;
 
+  try {
+    const mensaje = String(req.body?.mensaje ?? '').trim();
+    if (!mensaje) return res.status(400).json({ ok: false, error: 'Missing "mensaje"' });
 
-// ======================
-// DISCORD LOGIN
-// ======================
-client.login(DISCORD_TOKEN);
+    if (!GPT_CHANNEL_ID) {
+      return res.status(400).json({ ok: false, error: 'GPT_CHANNEL_ID not set' });
+    }
 
+    const canal = await client.channels.fetch(GPT_CHANNEL_ID).catch(() => null);
+    if (!canal || !canal.send) {
+      return res.status(500).json({ ok: false, error: 'Channel fetch/send failed' });
+    }
 
+    await canal.send(mensaje);
+
+    return res.status(200).json({ ok: true, sent: true });
+  } catch (e) {
+    console.error('POST /gpt/decir error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
 
 // =======================
 // DISCORD LOGIN
